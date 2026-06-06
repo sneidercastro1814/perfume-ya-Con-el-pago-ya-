@@ -118,7 +118,7 @@ const openWithParams = (raw, params) => {
     const u = new URL(raw);
     Object.entries(params).forEach(([k, v]) => u.searchParams.set(k, String(v)));
     window.open(u.toString(), "_blank");
-  } catch (_) {
+  } catch {
     window.open(raw, "_blank");
   }
 };
@@ -795,14 +795,41 @@ function describe(p) {
   return parts.join(" ");
 }
 
+/* Catálogo inicial: usa el guardado en localStorage si existe, si no el del archivo.
+   Se ejecuta una sola vez como estado inicial (evita un parpadeo del catálogo). */
+function loadInitialProducts() {
+  try {
+    const saved = localStorage.getItem(LS_KEY);
+    if (saved) {
+      const parsed = JSON.parse(saved);
+      if (Array.isArray(parsed) && parsed.length) {
+        // re-resolver imágenes originales por nombre de archivo (robusto entre builds)
+        return parsed.map((p) => ({ ...p, image: (p.img && imageForFile(p.img)) || p.image || "" }));
+      }
+    }
+  } catch { /* ignore */ }
+  return PRODUCTS;
+}
+
+/* ¿El usuario está volviendo de Wompi? (?wompi=1&id=<txId> o ?env=...) */
+function readWompiReturn() {
+  try {
+    const params = new URLSearchParams(window.location.search);
+    const id = params.get("id");
+    const fromWompi = params.get("wompi") === "1" || !!params.get("env");
+    return id && fromWompi ? { id, fromWompi: true } : { id: null, fromWompi: false };
+  } catch {
+    return { id: null, fromWompi: false };
+  }
+}
+
 /* ──────────────────────────────────────────────────────────────
    COMPONENTE PRINCIPAL
 ────────────────────────────────────────────────────────────── */
 export default function ReyDelAroma() {
-  const [view, setView] = useState("store");
-  const [products, setProducts] = useState(PRODUCTS);
+  const [view, setView] = useState(() => (readWompiReturn().fromWompi ? "pago-resultado" : "store"));
+  const [products, setProducts] = useState(loadInitialProducts);
   const [selectedProduct, setSelectedProduct] = useState(null);
-  const [selectedSize, setSelectedSize] = useState("");
   const [qty, setQty] = useState(1);
   const [cart, setCart] = useState([]);
   const [cartOpen, setCartOpen] = useState(false);
@@ -813,7 +840,6 @@ export default function ReyDelAroma() {
   const [adminView, setAdminView] = useState("list");
   const [editingId, setEditingId] = useState(null);
   const [form, setForm] = useState(EMPTY_FORM);
-  const [loaded, setLoaded] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [appReady, setAppReady] = useState(false);
   const [slide, setSlide] = useState(0);
@@ -829,7 +855,7 @@ export default function ReyDelAroma() {
   const [payMethod, setPayMethod] = useState("wompi");
   const [coForm, setCoForm] = useState({ name: "", phone: "", email: "", city: "", address: "" });
   const [placing, setPlacing] = useState(false);
-  const [payResult, setPayResult] = useState(null); // resultado tras volver de Wompi
+  const [payResult, setPayResult] = useState(() => (readWompiReturn().fromWompi ? { loading: true } : null)); // resultado tras volver de Wompi
 
   const banners = [
     { src: banner1, alt: "Más de 50 referencias disponibles", filter: "Todos" },
@@ -837,40 +863,26 @@ export default function ReyDelAroma() {
     { src: banner3, alt: "Los mejores perfumes árabes", filter: "Árabes" },
   ];
 
-  /* cargar catálogo guardado (localStorage) */
-  useEffect(() => {
-    try {
-      const saved = localStorage.getItem(LS_KEY);
-      if (saved) {
-        const parsed = JSON.parse(saved);
-        if (Array.isArray(parsed) && parsed.length) {
-          // re-resolver imágenes originales por nombre de archivo (robusto entre builds)
-          setProducts(parsed.map((p) => ({ ...p, image: (p.img && imageForFile(p.img)) || p.image || "" })));
-        }
-      }
-    } catch (_) {}
-    setLoaded(true);
-  }, []);
+  /* cargar catálogo guardado (localStorage)
+     → ya no hace falta un efecto: el catálogo se carga como estado inicial
+       perezoso en loadInitialProducts(). */
 
-  /* guardar cambios */
+  /* guardar cambios del catálogo en localStorage */
   useEffect(() => {
-    if (!loaded) return;
-    try { localStorage.setItem(LS_KEY, JSON.stringify(products)); } catch (_) {}
-  }, [products, loaded]);
+    try { localStorage.setItem(LS_KEY, JSON.stringify(products)); } catch { /* ignore */ }
+  }, [products]);
 
   useEffect(() => { const t = requestAnimationFrame(() => setAppReady(true)); return () => cancelAnimationFrame(t); }, []);
 
   /* ── RETORNO DESDE WOMPI ──
-     Wompi devuelve al cliente con ?wompi=1&id=<txId>&env=...
-     Consultamos el estado real de la transacción a la API pública. */
+     view y payResult ya se inicializan (perezosamente) según la URL.
+     Aquí solo limpiamos la URL y consultamos el estado real de la transacción
+     a la API pública de Wompi (los setState van en callbacks async, no en el
+     cuerpo del efecto). */
   useEffect(() => {
-    const params = new URLSearchParams(window.location.search);
-    const id = params.get("id");
-    const fromWompi = params.get("wompi") === "1" || !!params.get("env");
+    const { id, fromWompi } = readWompiReturn();
     if (!id || !fromWompi) return;
 
-    setView("pago-resultado");
-    setPayResult({ loading: true });
     // limpia la URL para que un refresh no reabra el resultado
     window.history.replaceState({}, "", window.location.pathname);
 
@@ -886,7 +898,7 @@ export default function ReyDelAroma() {
           amount: (t.amount_in_cents || 0) / 100,
           method: t.payment_method_type || "",
         });
-        try { localStorage.removeItem("rda-cart-v1"); } catch (_) {}
+        try { localStorage.removeItem("rda-cart-v1"); } catch { /* ignore */ }
       })
       .catch(() => setPayResult({ loading: false, status: "ERROR", txId: id }));
   }, []);
@@ -903,7 +915,7 @@ export default function ReyDelAroma() {
   /* mostrar el popup de correo poco después de entrar (solo la 1ª vez) */
   useEffect(() => {
     let already = false;
-    try { already = !!localStorage.getItem("rda-newsletter"); } catch (_) {}
+    try { already = !!localStorage.getItem("rda-newsletter"); } catch { /* ignore */ }
     if (already || view === "admin") return;
     const t = setTimeout(() => setNewsletterOpen(true), 1500);
     return () => clearTimeout(t);
@@ -911,7 +923,7 @@ export default function ReyDelAroma() {
 
   const closeNewsletter = () => {
     setNewsletterOpen(false);
-    try { localStorage.setItem("rda-newsletter", "dismissed"); } catch (_) {}
+    try { localStorage.setItem("rda-newsletter", "dismissed"); } catch { /* ignore */ }
   };
   const submitNewsletter = () => {
     const email = newsletterEmail.trim();
@@ -921,7 +933,7 @@ export default function ReyDelAroma() {
       if (!list.includes(email)) list.push(email);
       localStorage.setItem("rda-subscribers", JSON.stringify(list));
       localStorage.setItem("rda-newsletter", "subscribed");
-    } catch (_) {}
+    } catch { /* ignore */ }
     setNewsletterDone(true);
     setTimeout(() => setNewsletterOpen(false), 2400);
   };
@@ -931,7 +943,6 @@ export default function ReyDelAroma() {
 
   const openProduct = (p) => {
     setSelectedProduct(p);
-    setSelectedSize(p.size || "");
     setQty(1);
     setView("product");
     window.scrollTo({ top: 0 });
@@ -981,7 +992,7 @@ export default function ReyDelAroma() {
       localStorage.setItem("rda-last-order", JSON.stringify({
         reference, method: payMethod, total, items: checkoutItems, ...coForm, date: new Date().toISOString(),
       }));
-    } catch (_) {}
+    } catch { /* ignore */ }
 
     if (payMethod === "wompi") {
       if (!WOMPI.publicKey) return showToast("Falta configurar la llave de Wompi");
@@ -989,7 +1000,7 @@ export default function ReyDelAroma() {
       try {
         const url = await buildWompiUrl({ amount: total, reference, email: coForm.email, phone: coForm.phone, fullName: coForm.name });
         window.location.href = url;
-      } catch (_) {
+      } catch {
         setPlacing(false);
         showToast("No se pudo iniciar el pago. Intenta de nuevo.");
       }
@@ -1022,7 +1033,7 @@ export default function ReyDelAroma() {
   };
   const resetCatalog = () => {
     if (!confirm("¿Restaurar el catálogo original con los 45 productos? Se perderán tus cambios.")) return;
-    try { localStorage.removeItem(LS_KEY); } catch (_) {}
+    try { localStorage.removeItem(LS_KEY); } catch { /* ignore */ }
     setProducts(PRODUCTS);
     showToast("Catálogo original restaurado");
   };
